@@ -1,0 +1,15 @@
+variable "vpc_id" { type = string }
+variable "public_subnet_ids" { type = list(string) }
+variable "alb_name" { type = string }
+variable "alb_security_group_name" { type = string }
+variable "alb_ingress_cidr" { type = string }
+variable "listener_port" { type = number }
+variable "application_port" { type = number }
+variable "target_group_name_prefix" { type = string }
+variable "health_check_path" { type = string }
+variable "health_check_healthy_threshold" { type = number }
+variable "health_check_unhealthy_threshold" { type = number }
+variable "health_check_timeout" { type = number }
+variable "health_check_interval" { type = number }
+variable "health_check_matcher" { type = string }
+variable "deregistration_delay" { type = number }

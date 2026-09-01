@@ -1,0 +1,20 @@
+# Terraform working directories and state
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+.terraform.tfstate.lock.info
+
+# Local variable values
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+
+# Generated plan reports
+terraform-plan.txt
+terraform-drift.txt
+
+# Local IAM policies containing deployment-specific resource identifiers
+iam/

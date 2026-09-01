@@ -1,0 +1,209 @@
+name: Terraform checks and plan
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "**.tf"
+      - "**.tfvars.example"
+      - "**/.terraform.lock.hcl"
+      - "modules/**"
+      - "templates/**"
+      - ".github/workflows/terraform-*.yaml"
+  push:
+    branches: [main]
+    paths:
+      - "**.tf"
+      - "**.tfvars.example"
+      - "**/.terraform.lock.hcl"
+      - "modules/**"
+      - "templates/**"
+      - ".github/workflows/terraform-*.yaml"
+  workflow_dispatch:
+
+concurrency:
+  group: terraform-webapp-state
+  cancel-in-progress: false
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TERRAFORM_VERSION: "1.16.0"
+
+jobs:
+  static-checks:
+    name: Format and validate
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Check formatting
+        run: terraform fmt -check -recursive
+
+      - name: Initialize root without backend
+        run: terraform init -backend=false -input=false
+
+      - name: Validate root configuration
+        run: terraform validate -no-color
+
+      - name: Initialize bootstrap configuration
+        working-directory: bootstrap
+        run: terraform init -backend=false -input=false
+
+      - name: Validate bootstrap configuration
+        working-directory: bootstrap
+        run: terraform validate -no-color
+
+  plan:
+    name: Plan and publish review
+    needs: static-checks
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+      issues: write
+
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+
+    outputs:
+      exitcode: ${{ steps.plan.outputs.exitcode }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials through OIDC
+        uses: aws-actions/configure-aws-credentials@v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: terraform-plan-${{ github.run_id }}
+
+      - name: Initialize remote backend
+        run: terraform init -input=false
+
+      - name: Create Terraform plan
+        id: plan
+        shell: bash
+        run: |
+          set +e
+          terraform plan \
+            -input=false \
+            -no-color \
+            -detailed-exitcode \
+            -lock-timeout=5m \
+            -var='aws_profile=' \
+            > terraform-plan.txt 2>&1
+          exitcode=$?
+          set -e
+
+          echo "exitcode=$exitcode" >> "$GITHUB_OUTPUT"
+          cat terraform-plan.txt
+
+          if [ "$exitcode" -eq 1 ]; then
+            exit 1
+          fi
+
+      - name: Write plan summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Terraform plan"
+            echo
+            if [ -f terraform-plan.txt ]; then
+              grep -E '^(Plan:|No changes\.)' terraform-plan.txt || true
+            else
+              echo "Terraform did not produce a plan file."
+            fi
+            echo
+            echo "See the attached workflow artifact for the complete plan output."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload plan for review
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: terraform-plan-${{ github.run_id }}
+          path: terraform-plan.txt
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Comment on pull request
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v9
+        env:
+          PLAN_EXITCODE: ${{ steps.plan.outputs.exitcode }}
+        with:
+          script: |
+            const outcome = process.env.PLAN_EXITCODE === '2'
+              ? 'Terraform found proposed infrastructure changes.'
+              : process.env.PLAN_EXITCODE === '0'
+                ? 'Terraform found no infrastructure changes.'
+                : 'Terraform planning failed.';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `### Terraform plan\n\n${outcome}\n\n[Review the workflow run and plan artifact](${runUrl}).`
+            });
+
+      - name: Create or update push review issue
+        if: github.event_name == 'push' && steps.plan.outputs.exitcode == '2'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const title = 'Terraform deployment changes awaiting review';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              'Terraform detected unapplied configuration changes after a push to `main`.',
+              '',
+              `Commit: ${context.sha}`,
+              `[Review the plan artifact and workflow run](${runUrl})`,
+              '',
+              'Review these changes before running an approved apply.'
+            ].join('\n');
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100
+            });
+            const existing = issues.find(issue => !issue.pull_request && issue.title === title);
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body
+              });
+            }

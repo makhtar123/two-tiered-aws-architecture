@@ -1,0 +1,38 @@
+#!/bin/bash
+set -euo pipefail
+
+if ! command -v python3 >/dev/null 2>&1; then
+  apt-get update
+  apt-get install -y python3
+fi
+
+# root owns the site; www-data can traverse the directory and read its files.
+install -d -o root -g www-data -m 0750 /var/www/html
+
+cat > /var/www/html/index.html <<'HTML'
+${html_content}
+HTML
+
+chown root:www-data /var/www/html/index.html
+chmod 0640 /var/www/html/index.html
+
+cat > /etc/systemd/system/webapp.service <<'UNIT'
+[Unit]
+Description=Python web application
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+ExecStart=/usr/bin/python3 -m http.server ${app_port} --directory /var/www/html
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now webapp.service
