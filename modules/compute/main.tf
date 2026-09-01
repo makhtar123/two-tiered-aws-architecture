@@ -80,6 +80,10 @@ resource "aws_autoscaling_group" "app" {
   max_size            = var.maximum_capacity
   vpc_zone_identifier = var.private_subnet_ids
 
+  lifecycle {
+    ignore_changes = [desired_capacity]
+  }
+
   launch_template {
     id      = aws_launch_template.app.id
     version = aws_launch_template.app.latest_version
