@@ -54,15 +54,42 @@ jobs:
             -detailed-exitcode \
             -lock-timeout=5m \
             -var='aws_profile=' \
+            -out=terraform-drift.tfplan \
             > terraform-drift.txt 2>&1
           exitcode=$?
           set -e
 
-          echo "exitcode=$exitcode" >> "$GITHUB_OUTPUT"
           cat terraform-drift.txt
 
           if [ "$exitcode" -eq 1 ]; then
             exit 1
+          fi
+
+          if [ "$exitcode" -ne 0 ] && [ "$exitcode" -ne 2 ]; then
+            echo "Terraform returned unexpected exit code: $exitcode" >&2
+            exit 1
+          fi
+
+          terraform show -json terraform-drift.tfplan > terraform-drift.json
+
+          resource_drift_count=$(jq '[
+            (.resource_drift // [])[]
+            | select(.change.actions != ["no-op"])
+          ] | length' terraform-drift.json)
+
+          output_drift_count=$(jq '[
+            (.output_changes // {} | to_entries[])
+            | select(.value.actions != ["no-op"])
+          ] | length' terraform-drift.json)
+
+          echo "terraform_exitcode=$exitcode" >> "$GITHUB_OUTPUT"
+          echo "resource_drift_count=$resource_drift_count" >> "$GITHUB_OUTPUT"
+          echo "output_drift_count=$output_drift_count" >> "$GITHUB_OUTPUT"
+
+          if [ "$resource_drift_count" -gt 0 ] || [ "$output_drift_count" -gt 0 ]; then
+            echo "drift_detected=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "drift_detected=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Write drift summary
@@ -72,11 +99,15 @@ jobs:
           {
             echo "## Terraform drift check"
             echo
-            case "${{ steps.drift.outputs.exitcode }}" in
-              0) echo "No drift detected." ;;
-              2) echo "Infrastructure drift detected. Review is required." ;;
+            case "${{ steps.drift.outputs.drift_detected }}" in
+              false) echo "No drift detected." ;;
+              true) echo "Infrastructure drift detected. Review is required." ;;
               *) echo "Drift detection failed. Review the workflow logs." ;;
             esac
+            echo
+            echo "Terraform detailed exit code: \`${{ steps.drift.outputs.terraform_exitcode }}\`"
+            echo "Changed resources: \`${{ steps.drift.outputs.resource_drift_count }}\`"
+            echo "Changed outputs: \`${{ steps.drift.outputs.output_drift_count }}\`"
             echo
             echo "The complete refresh-only plan is attached as a workflow artifact."
           } >> "$GITHUB_STEP_SUMMARY"
@@ -90,8 +121,13 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+      - name: Delete sensitive plan files
+        if: always()
+        shell: bash
+        run: rm -f terraform-drift.tfplan terraform-drift.json
+
       - name: Create or update drift issue
-        if: steps.drift.outputs.exitcode == '2'
+        if: steps.drift.outputs.drift_detected == 'true'
         uses: actions/github-script@v9
         with:
           script: |
@@ -129,7 +165,7 @@ jobs:
             }
 
       - name: Close resolved drift issue
-        if: steps.drift.outputs.exitcode == '0'
+        if: steps.drift.outputs.drift_detected == 'false'
         uses: actions/github-script@v9
         with:
           script: |
@@ -157,7 +193,7 @@ jobs:
             }
 
       - name: Create workflow failure issue
-        if: failure() && steps.drift.outputs.exitcode != '2'
+        if: failure() && steps.drift.outputs.drift_detected != 'true'
         uses: actions/github-script@v9
         with:
           script: |

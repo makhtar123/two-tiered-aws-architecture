@@ -9,7 +9,7 @@ on:
       - "**/.terraform.lock.hcl"
       - "modules/**"
       - "templates/**"
-      - ".github/workflows/terraform-*.yaml"
+      - ".github/workflows/terraform-pr.yaml"
   push:
     branches: [main]
     paths:
@@ -18,7 +18,7 @@ on:
       - "**/.terraform.lock.hcl"
       - "modules/**"
       - "templates/**"
-      - ".github/workflows/terraform-*.yaml"
+      - ".github/workflows/terraform-pr.yaml"
   workflow_dispatch:
 
 concurrency:
